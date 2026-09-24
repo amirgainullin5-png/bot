@@ -1,0 +1,4 @@
+vkbottle>=4.11.0
+google-genai>=1.0.0
+python-dotenv
+aiofiles
