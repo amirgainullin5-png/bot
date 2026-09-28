@@ -26,8 +26,8 @@ VK_TOKEN = os.getenv("VK_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_IDS = set(map(int, os.getenv("ADMIN_IDS", "572460798").split(",")))
 
-WHITELIST_FILE = Path("whitelist.json")
-USER_MODES_FILE = Path("user_modes.json")
+WHITELIST_FILE = Path("../whitelist.json")
+USER_MODES_FILE = Path("../user_modes.json")
 LAWS_FILE = Path("laws.txt")
 
 # Лимиты защиты

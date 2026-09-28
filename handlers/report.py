@@ -19,6 +19,20 @@ logger = logging.getLogger("report")
 FORMS_FILE = BASE_DIR / "data" / "forms.json"
 
 
+def _main_kb_json():
+    """Главная клавиатура (чтобы не пропадала после сценария)."""
+    kb = Keyboard(one_time=False)
+    kb.add(Text("📋 Составление отчета"), color=KeyboardButtonColor.PRIMARY)
+    kb.row()
+    kb.add(Text("⚖️ Жалоба / иск"), color=KeyboardButtonColor.PRIMARY)
+    kb.row()
+    kb.add(Text("⚙️ Режим"), color=KeyboardButtonColor.SECONDARY)
+    kb.add(Text("👤 Профиль"), color=KeyboardButtonColor.SECONDARY)
+    return kb.get_json()
+
+
+
+
 def load_ranks() -> dict:
     if RANKS_FILE.exists():
         with open(RANKS_FILE, "r", encoding="utf-8") as f:
@@ -59,6 +73,19 @@ def is_valid_url(text: str) -> bool:
         return False
 
 
+def normalize_url(text: str) -> str:
+    """Сравнение ссылок без учёта хвостового / и регистра хоста."""
+    text = (text or "").strip()
+    try:
+        r = urlparse(text)
+        netloc = (r.netloc or "").lower()
+        path = (r.path or "").rstrip("/")
+        query = f"?{r.query}" if r.query else ""
+        return f"{r.scheme}://{netloc}{path}{query}"
+    except Exception:
+        return text.rstrip("/")
+
+
 MAX_LABEL_LEN = 40
 
 
@@ -71,7 +98,16 @@ def safe_label(text: str) -> str:
 
 def cancel_kb():
     kb = Keyboard(one_time=True)
-    kb.add(Text("Отмена"), color=KeyboardButtonColor.NEGATIVE)
+    kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
+    return kb.get_json()
+
+
+def confirm_dup_kb():
+    kb = Keyboard(one_time=True)
+    kb.add(Text("✅ Да, оставить"), color=KeyboardButtonColor.POSITIVE)
+    kb.add(Text("✏️ Исправить"), color=KeyboardButtonColor.PRIMARY)
+    kb.row()
+    kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
     return kb.get_json()
 
 
@@ -281,7 +317,7 @@ async def show_review(message: Message, state: dict):
             kb.row()
     kb.row()
     kb.add(Text("✅ Готово"), color=KeyboardButtonColor.POSITIVE)
-    kb.add(Text("Отмена"), color=KeyboardButtonColor.NEGATIVE)
+    kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
 
     await message.answer("\n".join(lines), keyboard=kb.get_json())
 
@@ -296,23 +332,35 @@ async def handle_report(message: Message, has_access_func) -> bool:
     if not has_access_func(uid):
         return False
 
-    if text == "Отмена":
+    if text in ("Отмена", "❌ Отмена"):
         if uid in user_states:
             clear_state(uid)
-            await message.answer("Действие отменено.")
+            await message.answer("Действие отменено.", keyboard=_main_kb_json())
             return True
         return False
 
     state = user_states.get(uid)
 
-    # Старт
-    if text in ("Составление отчета", "/report", "/отчет"):
+    # Старт только по кнопке (не /report — /report только техподдержка)
+    if text in ("📋 Составление отчета", "Составление отчета", "/отчет"):
+        # Кулдаун режима отчётов
+        try:
+            from services.whitelist import check_report_mode_cd, mark_report_mode
+            ok, reason = check_report_mode_cd(uid)
+            if not ok:
+                await message.answer(reason, keyboard=_main_kb_json())
+                return True
+            mark_report_mode(uid)
+        except Exception:
+            pass
+
         reload_ranks()
         reload_forms()
         if not RANKS:
             await message.answer(
                 "❌ Критерии не загружены.\n"
-                "Сначала: python -m parser.forum_parser --ranks"
+                "Сначала: python -m parser.forum_parser --ranks",
+                keyboard=_main_kb_json(),
             )
             return True
 
@@ -323,11 +371,12 @@ async def handle_report(message: Message, has_access_func) -> bool:
             faction_labels[label] = faction
             kb.add(Text(label), color=KeyboardButtonColor.PRIMARY)
             kb.row()
-        kb.add(Text("Отмена"), color=KeyboardButtonColor.NEGATIVE)
+        kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
 
         user_states[uid] = {"step": "faction", "faction_labels": faction_labels}
         await message.answer("Выберите фракцию:", keyboard=kb.get_json())
         return True
+
 
     if not state:
         return False
@@ -338,16 +387,28 @@ async def handle_report(message: Message, has_access_func) -> bool:
     if step == "faction":
         faction = state.get("faction_labels", {}).get(text) or (text if text in RANKS else None)
         if not faction:
-            await message.answer("Выберите фракцию кнопкой")
+            kb = Keyboard(one_time=True)
+            for f in RANKS.keys():
+                kb.add(Text(safe_label(f)), color=KeyboardButtonColor.PRIMARY)
+                kb.row()
+            kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
+            await message.answer("⚠️ Выберите фракцию кнопкой ниже.", keyboard=kb.get_json())
             return True
         state["faction"] = faction
         state["step"] = "department"
 
-        deps = list(RANKS[faction].get("departments", {}).keys())
+        # Без подразделений только 1-го ранга (отчёт для них не нужен), напр. «Курсанты»
+        deps = []
+        for d, ranks in RANKS[faction].get("departments", {}).items():
+            rank_keys = {str(k) for k in ranks.keys()}
+            if rank_keys and rank_keys <= {"1"}:
+                continue
+            deps.append(d)
         if not deps:
-            await message.answer("❌ У фракции нет отделов")
+            await message.answer("❌ У фракции нет доступных отделов", keyboard=_main_kb_json())
             clear_state(uid)
             return True
+
 
         department_labels = {}
         kb = Keyboard(one_time=True)
@@ -356,7 +417,7 @@ async def handle_report(message: Message, has_access_func) -> bool:
             department_labels[label] = d
             kb.add(Text(label), color=KeyboardButtonColor.PRIMARY)
             kb.row()
-        kb.add(Text("Отмена"), color=KeyboardButtonColor.NEGATIVE)
+        kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
         state["department_labels"] = department_labels
         await message.answer("Выберите отдел:", keyboard=kb.get_json())
         return True
@@ -368,17 +429,32 @@ async def handle_report(message: Message, has_access_func) -> bool:
             text if text in RANKS[faction]["departments"] else None
         )
         if not department:
-            await message.answer("Выберите отдел кнопкой")
+            kb = Keyboard(one_time=True)
+            for d in RANKS[faction].get("departments", {}).keys():
+                kb.add(Text(safe_label(d)), color=KeyboardButtonColor.PRIMARY)
+                kb.row()
+            kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
+            await message.answer("⚠️ Выберите отдел кнопкой ниже.", keyboard=kb.get_json())
             return True
         state["department"] = department
         state["step"] = "rank"
 
-        ranks = RANKS[faction]["departments"][department]
+        ranks = {
+            k: v for k, v in RANKS[faction]["departments"][department].items()
+            if str(k) != "1"
+        }
+        if not ranks:
+            await message.answer(
+                "❌ В этом отделе нет званий, для которых нужен отчёт.",
+                keyboard=_main_kb_json(),
+            )
+            clear_state(uid)
+            return True
         kb = Keyboard(one_time=True)
         for key, info in ranks.items():
             kb.add(Text(safe_label(f"[{key}] {info['from']}")), color=KeyboardButtonColor.SECONDARY)
             kb.row()
-        kb.add(Text("Отмена"), color=KeyboardButtonColor.NEGATIVE)
+        kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
         await message.answer("Выберите текущее звание:", keyboard=kb.get_json())
         return True
 
@@ -392,7 +468,16 @@ async def handle_report(message: Message, has_access_func) -> bool:
                 chosen = key
                 break
         if not chosen:
-            await message.answer("Выберите звание кнопкой")
+            ranks = {
+                k: v for k, v in RANKS[faction]["departments"][department].items()
+                if str(k) != "1"
+            }
+            kb = Keyboard(one_time=True)
+            for key, info in ranks.items():
+                kb.add(Text(safe_label(f"[{key}] {info['from']}")), color=KeyboardButtonColor.SECONDARY)
+                kb.row()
+            kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
+            await message.answer("⚠️ Выберите звание кнопкой ниже.", keyboard=kb.get_json())
             return True
         state["rank_key"] = chosen
         state["step"] = "position"
@@ -449,9 +534,10 @@ async def handle_report(message: Message, has_access_func) -> bool:
         rank_info = RANKS[state["faction"]]["departments"][state["department"]][state["rank_key"]]
         criteria = rank_info.get("criteria", [])
         if not criteria:
-            await message.answer("❌ Нет критериев у этого звания")
+            await message.answer("❌ Нет критериев у этого звания", keyboard=_main_kb_json())
             clear_state(uid)
             return True
+
 
         await message.answer(
             f"Пункт 1/{len(criteria)}:\n{criteria[0]}\n\nСсылка на доказательства:",
@@ -461,12 +547,31 @@ async def handle_report(message: Message, has_access_func) -> bool:
 
     if step == "work":
         if not is_valid_url(text):
-            await message.answer("❌ Нужна корректная ссылка", keyboard=cancel_kb())
+            await message.answer("❌ Нужна корректная ссылка (http/https).", keyboard=cancel_kb())
             return True
 
         idx = state["work_index"]
-        state[f"work_{idx + 1}"] = text
+        url_norm = normalize_url(text)
 
+        # Уже введённые ссылки по предыдущим пунктам (work_1 .. work_idx)
+        dups = []
+        for i in range(1, idx + 1):
+            prev_url = normalize_url(state.get(f"work_{i}") or "")
+            if prev_url and prev_url == url_norm:
+                dups.append(i)
+        if dups:
+            state["pending_work_url"] = text.strip()
+            state["step"] = "work_dup_confirm"
+            logger.info(f"[report] dup url uid={uid} points={dups} url={url_norm}")
+            nums = ", ".join(str(i) for i in dups)
+            await message.answer(
+                f"⚠️ Эта ссылка уже указана в пункте(ах): {nums}.\n\n"
+                f"Оставить её и для текущего пункта?",
+                keyboard=confirm_dup_kb(),
+            )
+            return True
+
+        state[f"work_{idx + 1}"] = text.strip()
         rank_info = RANKS[state["faction"]]["departments"][state["department"]][state["rank_key"]]
         criteria = rank_info.get("criteria", [])
         total = len(criteria)
@@ -480,6 +585,45 @@ async def handle_report(message: Message, has_access_func) -> bool:
         await message.answer(
             f"Пункт {idx + 2}/{total}:\n{criteria[idx + 1]}\n\nСсылка на доказательства:",
             keyboard=cancel_kb(),
+        )
+        return True
+
+    if step == "work_dup_confirm":
+        if text == "✅ Да, оставить":
+            idx = state["work_index"]
+            url_norm = state.pop("pending_work_url", "")
+            state[f"work_{idx + 1}"] = url_norm
+            rank_info = RANKS[state["faction"]]["departments"][state["department"]][state["rank_key"]]
+            criteria = rank_info.get("criteria", [])
+            total = len(criteria)
+            if idx + 1 >= total:
+                state["step"] = "signature"
+                await message.answer("Введите подпись:", keyboard=cancel_kb())
+                return True
+            state["work_index"] = idx + 1
+            state["step"] = "work"
+            await message.answer(
+                f"Пункт {idx + 2}/{total}:\n{criteria[idx + 1]}\n\nСсылка на доказательства:",
+                keyboard=cancel_kb(),
+            )
+            return True
+
+        if text == "✏️ Исправить":
+            state.pop("pending_work_url", None)
+            state["step"] = "work"
+            idx = state["work_index"]
+            rank_info = RANKS[state["faction"]]["departments"][state["department"]][state["rank_key"]]
+            criteria = rank_info.get("criteria", [])
+            await message.answer(
+                f"Пункт {idx + 1}/{len(criteria)}:\n{criteria[idx]}\n\n"
+                f"Введите другую ссылку на доказательства:",
+                keyboard=cancel_kb(),
+            )
+            return True
+
+        await message.answer(
+            "Выберите: ✅ Да, оставить — или ✏️ Исправить.",
+            keyboard=confirm_dup_kb(),
         )
         return True
 
@@ -497,7 +641,8 @@ async def handle_report(message: Message, has_access_func) -> bool:
             clear_state(uid)
             await message.answer(
                 "✅ Рапорт готов! Скопируйте BB-код.\n"
-                "На форуме вставляйте в режиме [] (BB-код), не в визуальном редакторе."
+                "На форуме вставляйте в режиме [] (BB-код), не в визуальном редакторе.",
+                keyboard=_main_kb_json(),
             )
             if len(bb) > 3900:
                 for i in range(0, len(bb), 3900):
@@ -505,6 +650,7 @@ async def handle_report(message: Message, has_access_func) -> bool:
             else:
                 await message.answer(bb)
             return True
+
 
         if text == "✏️ Должность":
             state["step"] = "edit_position"
@@ -536,8 +682,10 @@ async def handle_report(message: Message, has_access_func) -> bool:
                 state["step"] = f"edit_work_{num}"
                 await message.answer(f"Новая ссылка для пункта {num}:", keyboard=cancel_kb())
             except ValueError:
-                pass
+                await show_review(message, state)
             return True
+        # любое другое сообщение — снова показать кнопки проверки
+        await show_review(message, state)
         return True
 
     # Редактирование

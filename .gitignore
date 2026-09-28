@@ -31,3 +31,14 @@ Thumbs.db
 *.log
 *.tmp
 EOF
+
+# пользовательские данные — не в публичный репозиторий
+data/whitelist.json
+data/access_state.json
+data/consents.json
+data/user_modes.json
+user_modes.json
+whitelist.json
+archive/parser.py
+archive/bot_report.py
+archive/bot_test.py

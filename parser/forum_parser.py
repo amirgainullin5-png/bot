@@ -1,10 +1,14 @@
 import re
+import time
 import json
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
+
+# Пауза между запросами к форуму (сек.) — бережный режим без лишней нагрузки
+REQUEST_DELAY_SEC = 5
 
 def clean_text(text: str) -> str:
     text = re.sub(r"[\n\r\t\xa0]", " ", text)
@@ -110,6 +114,9 @@ def update_laws():
         page = browser.new_page()
         for idx, url in enumerate(links, 1):
             try:
+                if idx > 1:
+                    print(f"  … пауза {REQUEST_DELAY_SEC} с")
+                    time.sleep(REQUEST_DELAY_SEC)
                 print(f"[{idx}/{len(links)}] {url}")
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(1500)
@@ -146,6 +153,9 @@ def update_ranks():
 
         for idx, url in enumerate(links, 1):
             try:
+                if idx > 1:
+                    print(f"  … пауза {REQUEST_DELAY_SEC} с")
+                    time.sleep(REQUEST_DELAY_SEC)
                 print(f"[{idx}/{len(links)}] {url}")
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(2000)
@@ -220,6 +230,9 @@ def update_forms():
 
         for idx, url in enumerate(links, 1):
             try:
+                if idx > 1:
+                    print(f"  … пауза {REQUEST_DELAY_SEC} с")
+                    time.sleep(REQUEST_DELAY_SEC)
                 print(f"[{idx}/{len(links)}] {url}")
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(2000)
